@@ -77,7 +77,7 @@ if '功能函数':
         
 class Database:
     def __init__(self):
-        self.conn = sqlite3.connect('quant.db')
+        self.conn = sqlite3.connect(DB_PATH)
         self.cursor = self.conn.cursor()
     
     def verify_date(self, date):
