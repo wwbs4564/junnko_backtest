@@ -20,6 +20,11 @@ with open('token.txt', 'r') as f:
 with open('db_path.txt', 'r') as f:
     DB_PATH = f.read()
 
+if not os.path.exists('event_result'):
+    os.mkdir('event_result')
+if not os.path.exists('factor_result'):
+    os.mkdir('factor_result')
+
 
 pro = ts.pro_api(TS_TOKEN)
 ts.set_token(TS_TOKEN)
