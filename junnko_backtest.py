@@ -101,6 +101,68 @@ class Database:
         return fields
 
     if '获取数据':
+        def get_ttm_data(self, col, table, codes, date, during_backtest=True):
+            if table not in ['income', 'cashflow']:
+                raise ValueError('get_ttm_data函数只支持利润表和现金流量表！')
+            date_col = decide_date_col(table)
+            if during_backtest:
+                date = self.verify_date(date)
+            
+            if isinstance(codes, str):
+                codes = [codes, 'just a place holder']
+            elif isinstance(codes, list) and len(codes) == 1:
+                codes.append('just a place holder')
+            elif codes is None:
+                codes = self.get_stock_info(codes=None).index.to_list()
+            
+            query = f"""
+                    select * 
+                    from {table} 
+                    where ts_code in {tuple(codes)} 
+                    and 
+                    {date_col} <= '{date}'
+                    """
+            df = pd.read_sql(query, self.conn)
+            cols_to_keep = get_primary_key(table, self.conn)
+            if col not in cols_to_keep:
+                cols_to_keep.append(col)
+            if date_col not in cols_to_keep:
+                cols_to_keep.append(date_col)
+
+            df = df[cols_to_keep]
+            df.set_index('ts_code', inplace=True)
+            final_df = df.groupby('ts_code').last()
+            ttm_col = f'{col}_ttm'
+            final_df.loc[:, ttm_col] = None
+            for code in final_df.index:
+                code_end_date = final_df.loc[code, 'end_date']
+                last_year_fourth_date = str(int(code_end_date[:4])-1) + '1231'
+                last_year_third_date = str(int(code_end_date[:4])-1) + '0930'
+                last_year_second_date = str(int(code_end_date[:4])-1) + '0630'
+                last_year_first_date = str(int(code_end_date[:4])-1) + '0331'
+                if code_end_date.endswith('1231'):
+                    pass
+                elif code_end_date.endswith('0930'):
+                    last_year_fourth_report = df[(df.index==code)&(df['end_date']==last_year_fourth_date)]
+                    last_year_third_report = df[(df.index==code)&(df['end_date']==last_year_third_date)]
+                    if len(last_year_fourth_report) > 0 and len(last_year_third_report) > 0:
+                        last_year_4q_data = last_year_fourth_report[col].iloc[0] - last_year_third_report[col].iloc[0]
+                        final_df.loc[code, ttm_col] = final_df.loc[code, col] + last_year_4q_data
+                elif code_end_date.endswith('0630'):
+                    last_year_fourth_report = df[(df.index==code)&(df['end_date']==last_year_fourth_date)]
+                    last_year_second_report = df[(df.index==code)&(df['end_date']==last_year_second_date)]
+                    if len(last_year_fourth_report) > 0 and len(last_year_second_report) > 0:
+                        last_year_3q_4q_data = last_year_fourth_report[col].iloc[0] - last_year_second_report[col].iloc[0]
+                        final_df.loc[code, ttm_col] = final_df.loc[code, col] + last_year_3q_4q_data
+                elif code_end_date.endswith('0331'):
+                    last_year_fourth_report = df[(df.index==code)&(df['end_date']==last_year_fourth_date)]
+                    last_year_first_report = df[(df.index==code)&(df['end_date']==last_year_first_date)]
+                    if len(last_year_fourth_report) > 0 and len(last_year_first_report) > 0:
+                        last_year_2q_3q_4q_data = last_year_fourth_report[col].iloc[0] - last_year_first_report[col].iloc[0]
+                        final_df.loc[code, ttm_col] = final_df.loc[code, col] + last_year_2q_3q_4q_data
+            return final_df
+                    
+
         def get_daily_data(self, col, table, codes, date, during_backtest=True):
             date_col = decide_date_col(table)
             if during_backtest:
@@ -114,13 +176,20 @@ class Database:
                 codes = self.get_stock_info(codes=None).index.to_list()
             
             query = f"""
-                    select ts_code, {date_col}, {col} 
+                    select * 
                     from {table} 
                     where ts_code in {tuple(codes)} 
                     and 
                     {date_col} <= '{date}'
                     """
             df = pd.read_sql(query, self.conn)
+            cols_to_keep = get_primary_key(table, self.conn)
+            if col not in cols_to_keep:
+                cols_to_keep.append(col)
+            if date_col not in cols_to_keep:
+                cols_to_keep.append(date_col)
+
+            df = df[cols_to_keep]
             df.set_index('ts_code', inplace=True)
             df = df.groupby('ts_code').last()
             return df
