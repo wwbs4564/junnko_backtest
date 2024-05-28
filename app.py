@@ -249,7 +249,7 @@ with data_tab:
 
         st.dataframe(df)
     
-    elif selected_table in ['income', 'balancesheet', 'cashflow', 'stock_daily_price', 'index_daily_price', 'stock_daily_basic']:
+    elif selected_table in ['income', 'balancesheet', 'cashflow', 'stock_daily_price', 'stock_daily_price_hfq', 'index_daily_price', 'stock_daily_basic']:
         query = f"SELECT DISTINCT ts_code FROM {selected_table}"
         all_codes = pd.read_sql(query, backtest.conn)['ts_code'].tolist()
         selected_code = st.selectbox("请选择一个代码:", all_codes, index=0)
@@ -275,7 +275,7 @@ with data_tab:
                 for c in tqdm(codes):
                     backtest.update_financial_statement(table=selected_table, code=c, start_date=None)
             
-        elif selected_table in ['stock_daily_price', 'index_daily_price', 'stock_daily_basic']:
+        elif selected_table in ['stock_daily_price', 'stock_daily_price_hfq', 'index_daily_price', 'stock_daily_basic']:
             df = pd.read_sql(query, backtest.conn).sort_values(by='trade_date', ascending=False)
             st.markdown(f'最新**交易日期**: {df["trade_date"].max()}')
             st.markdown(f'最近**更新时间**：{df["INSERT_TIME"].max()}')
@@ -284,24 +284,24 @@ with data_tab:
             update_all_code = st.button('更新所有代码数据')
 
             if update_current_code:
-                if selected_table in ['stock_daily_price', 'index_daily_price']:
+                if selected_table in ['stock_daily_price', 'stock_daily_price_hfq', 'index_daily_price']:
                     backtest.update_daily_price(table=selected_table, code=selected_code, start_date=df["trade_date"].max())
                 elif selected_table in ['stock_daily_basic']:
                     backtest.update_daily_basic(code=selected_code, start_date=df["trade_date"].max())
 
             elif update_all_code:
-                if selected_table  == 'stock_daily_price':
+                if selected_table  in ['stock_daily_price', 'stock_daily_price_hfq']:
                     query = f"select ts_code from stock_info"
                     stock_codes = pd.read_sql(query, backtest.conn)['ts_code'].to_list()
                     for c in tqdm(stock_codes):
-                        query = f'select max(trade_date) from stock_daily_price where ts_code = "{c}"'
+                        query = f'select max(trade_date) from {selected_table} where ts_code = "{c}"'
                         start_date = pd.read_sql(query, backtest.conn).iloc[0, 0]
                         backtest.update_daily_price(table=selected_table, code=c, start_date=start_date)
 
                 elif selected_table == 'index_daily_price':
                     query = f"select index_code from index_info"
                     index_codes = pd.read_sql(query, backtest.conn)['index_code'].to_list()
-                    for c in index_codes:
+                    for c in tqdm(index_codes):
                         query = f'select max(trade_date) from index_daily_price where index_code = "{c}"'
                         start_date = pd.read_sql(query, backtest.conn).iloc[0, 0]
                         backtest.update_daily_price(table=selected_table, code=c, start_date=None)

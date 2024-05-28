@@ -34,7 +34,7 @@ if '功能函数':
     def decide_date_col(table):
         if table in ['income', 'balancesheet', 'cashflow']:
             date_col = 'f_ann_date'
-        elif table in ['stock_daily_price', 'stock_daily_basic', 'index_daily_price']:
+        elif table in ['stock_daily_price', 'stock_daily_price_hfq', 'stock_daily_basic', 'index_daily_price']:
             date_col = 'trade_date'
         return date_col
     
@@ -132,7 +132,7 @@ class Database:
 
             if code is not None:
                 query = f"""
-                        select ts_code, {date_col}, {col} 
+                        select {date_col}, {col} 
                         from {table} 
                         where ts_code = '{code}' 
                         and 
@@ -153,7 +153,10 @@ class Database:
                 df = pd.read_sql(query, self.conn)                
             return df
         
-        def get_stock_info(self, codes):
+        def get_stock_info(self, codes, date, during_backtest=True):
+            if during_backtest:
+                date = self.verify_date(date)
+        
             if isinstance(codes, str):
                 codes = [codes, 'just a place holder']
             elif isinstance(codes, list) and len(codes) == 1:
@@ -164,11 +167,13 @@ class Database:
                         select *
                         from stock_info 
                         where ts_code in {tuple(codes)}
+                        and list_date <= '{date}'
                         """
             else:
                 query = f"""
                         select *
                         from stock_info
+                        where list_date <= '{date}'
                         """
             df = pd.read_sql(query, self.conn)
             df.set_index('ts_code', inplace=True)
@@ -325,34 +330,31 @@ class Database:
             self.general_update_func(table='index_component', id=index_code, id_col='index_code', df=df)
 
         def general_update_func(self, table, id, id_col, df):
-            # 获取表格的主键列，提取主键列的数据
-            primary_key = get_primary_key(table, self.conn)
+            if df is not None and len(df) > 0:
+                # 获取表格的主键列，提取主键列的数据
+                primary_key = get_primary_key(table, self.conn)
 
-            # 如果指定了id和id_col，则只提取符合id的部分数据
-            if id is not None and id_col is not None:
-                query = f"""
-                        select {', '.join(primary_key)} 
-                        from {table} 
-                        where {id_col} = '{id}' 
-                        """
-            # 如果id和id_col均为None，则提取所有数据
-            elif id is None and id_col is None:
-                query = f"""
-                        select {', '.join(primary_key)} 
-                        from {table}
-                        """
-            existing_data = pd.read_sql(query, self.conn)
+                # 如果指定了id和id_col，则只提取符合id的部分数据
+                if id is not None and id_col is not None:
+                    query = f"""
+                            select {', '.join(primary_key)} 
+                            from {table} 
+                            where {id_col} = '{id}' 
+                            """
+                # 如果id和id_col均为None，则提取所有数据
+                elif id is None and id_col is None:
+                    query = f"""
+                            select {', '.join(primary_key)} 
+                            from {table}
+                            """
+                existing_data = pd.read_sql(query, self.conn)
 
-            # 从df中删除已有的数据
-            df_pk = df[primary_key]
-            duplicates = df_pk[df_pk.apply(tuple, 1).isin(existing_data.apply(tuple, 1))]
-            df = df.drop(duplicates.index)
+                # 从df中删除已有的数据
+                df_pk = df[primary_key]
+                duplicates = df_pk[df_pk.apply(tuple, 1).isin(existing_data.apply(tuple, 1))]
+                df = df.drop(duplicates.index)
 
-            if len(df) > 0:
                 df.to_sql(table, self.conn, if_exists='append', index=False)
-                print(f'{id} {table}数据更新完成')
-            else:
-                print('数据无需更新')
 
         def update_financial_statement(self, table, code, start_date):
             supported_tables = ['income', 'balancesheet', 'cashflow']
@@ -374,15 +376,17 @@ class Database:
             self.general_update_func(table=table, id=code, id_col='ts_code', df=df)
 
         def update_daily_price(self, table, code, start_date):
-            supported_tables = ['stock_daily_price', 'index_daily_price']
+            supported_tables = ['stock_daily_price', 'stock_daily_price_hfq', 'index_daily_price']
             if table not in supported_tables:
                 raise ValueError(f'该方法支持的表名：{supported_tables}，指定表名{table}不在范围内')
             
             if pd.isna(start_date):
                 start_date = '20000101'
                             
-            if table == 'stock_daily_price':
-                df = ts.pro_bar(ts_code=code, adj='qfq', start_date=start_date)
+            if table == 'stock_daily_price_hfq':
+                df = ts.pro_bar(ts_code=code, adj='hfq', start_date=start_date)
+            elif table == 'stock_daily_price':
+                df = ts.pro_bar(ts_code=code, adj=None, start_date=start_date)
             elif table == 'index_daily_price':
                 df = ts.pro_bar(ts_code=code, asset='I', start_date=start_date)
 
@@ -423,7 +427,7 @@ class Junnko_Backtest(Database):
         super().__init__()
     
     def buy(self, code, shares):
-        price = self.get_daily_data('close', 'stock_daily_price', code, None)
+        price = self.get_daily_data('close', 'stock_daily_price_hfq', code, None)
         if code in price.index:
             price = price.loc[code, 'close']
             money = price * shares * (1+self.commission_rate)
@@ -452,7 +456,7 @@ class Junnko_Backtest(Database):
             
             shares = shares//100*100
             if shares > 0:
-                price = self.get_daily_data('close', 'stock_daily_price', code, None)
+                price = self.get_daily_data('close', 'stock_daily_price_hfq', code, None)
                 if code in price.index:
                     price = price.loc[code, 'close']
                     self.cash += shares*price
@@ -484,7 +488,7 @@ class Junnko_Backtest(Database):
         else:
             current_position = 0
         if self.get_stock_trading_status(code=code, date=None):
-            current_price = self.get_daily_data('open', 'stock_daily_price', code, None).loc[code, 'open']
+            current_price = self.get_daily_data('open', 'stock_daily_price_hfq', code, None).loc[code, 'open']
             target_shares = target_value // current_price
             shares = target_shares - current_position
             self.order(code, shares)
@@ -492,7 +496,7 @@ class Junnko_Backtest(Database):
     def calculate_net_value(self):
         net_value = self.cash
         for code in self.position.keys():
-            net_value += self.position[code] * self.get_daily_data(col='close', table='stock_daily_price', codes=code, date = None).loc[code, 'close']
+            net_value += self.position[code] * self.get_daily_data(col='close', table='stock_daily_price_hfq', codes=code, date = None).loc[code, 'close']
         return net_value
 
     def run_event_backtest(self, start_date, end_date, initial_capital, commission_rate, strategy):
@@ -516,7 +520,7 @@ class Junnko_Backtest(Database):
         factor = factor[[c for c in all_codes if c in factor.columns]]
 
         print('正在获取股票日收益率')
-        query = f'select * from stock_daily_price where ts_code in {tuple(all_codes)}'
+        query = f'select * from stock_daily_price_hfq where ts_code in {tuple(all_codes)}'
         stock_daily_ret = pd.read_sql(query, self.conn)
         stock_daily_ret = stock_daily_ret.pivot_table(values='close', index='trade_date', columns='ts_code').pct_change()
 
