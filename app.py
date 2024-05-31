@@ -275,6 +275,12 @@ with data_tab:
                 for c in tqdm(codes):
                     backtest.update_financial_statement(table=selected_table, code=c, start_date=None)
             
+            code_to_update_fs = st.text_input("请输入获取的代码:", value='')
+            get_start_date_fs = st.text_input("请输入开始日期:", value='20000101')
+            get_new_button_fs = st.button('获取数据')
+            if get_new_button_fs:
+                backtest.update_financial_statement(table=selected_table, code=code_to_update_fs, start_date=get_start_date_fs)
+            
         elif selected_table in ['stock_daily_price', 'stock_daily_price_hfq', 'index_daily_price', 'stock_daily_basic']:
             df = pd.read_sql(query, backtest.conn).sort_values(by='trade_date', ascending=False)
             st.markdown(f'最新**交易日期**: {df["trade_date"].max()}')

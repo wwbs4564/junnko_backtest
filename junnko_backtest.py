@@ -6,6 +6,7 @@ import datetime
 import empyrical
 import pickle
 from tqdm import tqdm
+from tqdm.notebook import tqdm as ntqdm
 import inspect
 import sqlite3
 import time
@@ -79,6 +80,17 @@ if '功能函数':
         cum_benchmark_ret = empyrical.cum_returns(benchmark_rets).iloc[-1]
         metrics['累计超额收益'] = metrics['累计收益'] - cum_benchmark_ret
         return metrics
+    
+    def map_code(code):
+        code_map = {
+            '000022.SZ' : '001872.SZ',
+            '600087.SH' : '601975.SH'
+        }
+        if code in code_map.keys():
+            return code_map[code]
+        else:
+            return code
+    
         
 class Database:
     def __init__(self):
@@ -99,6 +111,17 @@ class Database:
         fields.remove('INSERT_TIME')
         fields = (',').join(fields)
         return fields
+    
+    
+    def verify_codes(self, codes):
+        if isinstance(codes, str):
+            codes = [codes, 'just a place holder']
+        elif isinstance(codes, list) and len(codes) == 1:
+            codes.append('just a place holder')
+        elif codes is None:
+            codes = self.get_stock_info(codes=None).index.to_list()
+        codes = [map_code(code) for code in codes]
+        return codes
 
     if '获取数据':
         def get_ttm_data(self, col, table, codes, date, during_backtest=True):
@@ -133,33 +156,34 @@ class Database:
             df.set_index('ts_code', inplace=True)
             final_df = df.groupby('ts_code').last()
             ttm_col = f'{col}_ttm'
-            final_df.loc[:, ttm_col] = None
-            for code in final_df.index:
-                code_end_date = final_df.loc[code, 'end_date']
-                last_year_fourth_date = str(int(code_end_date[:4])-1) + '1231'
-                last_year_third_date = str(int(code_end_date[:4])-1) + '0930'
-                last_year_second_date = str(int(code_end_date[:4])-1) + '0630'
-                last_year_first_date = str(int(code_end_date[:4])-1) + '0331'
-                if code_end_date.endswith('1231'):
-                    pass
-                elif code_end_date.endswith('0930'):
-                    last_year_fourth_report = df[(df.index==code)&(df['end_date']==last_year_fourth_date)]
-                    last_year_third_report = df[(df.index==code)&(df['end_date']==last_year_third_date)]
-                    if len(last_year_fourth_report) > 0 and len(last_year_third_report) > 0:
-                        last_year_4q_data = last_year_fourth_report[col].iloc[0] - last_year_third_report[col].iloc[0]
-                        final_df.loc[code, ttm_col] = final_df.loc[code, col] + last_year_4q_data
-                elif code_end_date.endswith('0630'):
-                    last_year_fourth_report = df[(df.index==code)&(df['end_date']==last_year_fourth_date)]
-                    last_year_second_report = df[(df.index==code)&(df['end_date']==last_year_second_date)]
-                    if len(last_year_fourth_report) > 0 and len(last_year_second_report) > 0:
-                        last_year_3q_4q_data = last_year_fourth_report[col].iloc[0] - last_year_second_report[col].iloc[0]
-                        final_df.loc[code, ttm_col] = final_df.loc[code, col] + last_year_3q_4q_data
-                elif code_end_date.endswith('0331'):
-                    last_year_fourth_report = df[(df.index==code)&(df['end_date']==last_year_fourth_date)]
-                    last_year_first_report = df[(df.index==code)&(df['end_date']==last_year_first_date)]
-                    if len(last_year_fourth_report) > 0 and len(last_year_first_report) > 0:
-                        last_year_2q_3q_4q_data = last_year_fourth_report[col].iloc[0] - last_year_first_report[col].iloc[0]
-                        final_df.loc[code, ttm_col] = final_df.loc[code, col] + last_year_2q_3q_4q_data
+            final_df[ttm_col] = None
+            if len(final_df) > 0:
+                for code in final_df.index:
+                    code_end_date = final_df.loc[code, 'end_date']
+                    last_year_fourth_date = str(int(code_end_date[:4])-1) + '1231'
+                    last_year_third_date = str(int(code_end_date[:4])-1) + '0930'
+                    last_year_second_date = str(int(code_end_date[:4])-1) + '0630'
+                    last_year_first_date = str(int(code_end_date[:4])-1) + '0331'
+                    if code_end_date.endswith('1231'):
+                        pass
+                    elif code_end_date.endswith('0930'):
+                        last_year_fourth_report = df[(df.index==code)&(df['end_date']==last_year_fourth_date)]
+                        last_year_third_report = df[(df.index==code)&(df['end_date']==last_year_third_date)]
+                        if len(last_year_fourth_report) > 0 and len(last_year_third_report) > 0:
+                            last_year_4q_data = last_year_fourth_report[col].iloc[0] - last_year_third_report[col].iloc[0]
+                            final_df.loc[code, ttm_col] = final_df.loc[code, col] + last_year_4q_data
+                    elif code_end_date.endswith('0630'):
+                        last_year_fourth_report = df[(df.index==code)&(df['end_date']==last_year_fourth_date)]
+                        last_year_second_report = df[(df.index==code)&(df['end_date']==last_year_second_date)]
+                        if len(last_year_fourth_report) > 0 and len(last_year_second_report) > 0:
+                            last_year_3q_4q_data = last_year_fourth_report[col].iloc[0] - last_year_second_report[col].iloc[0]
+                            final_df.loc[code, ttm_col] = final_df.loc[code, col] + last_year_3q_4q_data
+                    elif code_end_date.endswith('0331'):
+                        last_year_fourth_report = df[(df.index==code)&(df['end_date']==last_year_fourth_date)]
+                        last_year_first_report = df[(df.index==code)&(df['end_date']==last_year_first_date)]
+                        if len(last_year_fourth_report) > 0 and len(last_year_first_report) > 0:
+                            last_year_2q_3q_4q_data = last_year_fourth_report[col].iloc[0] - last_year_first_report[col].iloc[0]
+                            final_df.loc[code, ttm_col] = final_df.loc[code, col] + last_year_2q_3q_4q_data
             return final_df
                     
 
@@ -168,60 +192,93 @@ class Database:
             if during_backtest:
                 date = self.verify_date(date)
 
-            if isinstance(codes, str):
-                codes = [codes, 'just a place holder']
-            elif isinstance(codes, list) and len(codes) == 1:
-                codes.append('just a place holder')
-            elif codes is None:
-                codes = self.get_stock_info(codes=None).index.to_list()
+            codes = self.verify_codes(codes)
             
             query = f"""
-                    select * 
+                    select *
                     from {table} 
                     where ts_code in {tuple(codes)} 
                     and 
                     {date_col} <= '{date}'
                     """
             df = pd.read_sql(query, self.conn)
-            cols_to_keep = get_primary_key(table, self.conn)
-            if col not in cols_to_keep:
-                cols_to_keep.append(col)
-            if date_col not in cols_to_keep:
-                cols_to_keep.append(date_col)
-
-            df = df[cols_to_keep]
-            df.set_index('ts_code', inplace=True)
+            if col is not None:
+                df = df[['ts_code', date_col, col]]
+            # cols_to_keep = get_primary_key(table, self.conn)
+            # if col not in cols_to_keep:
+            #     cols_to_keep.append(col)
+            # if date_col not in cols_to_keep:
+            #     cols_to_keep.append(date_col)
+            # df = df[cols_to_keep]
             df = df.groupby('ts_code').last()
             return df
         
-        def get_historical_data(self, col, table, code, start_date, end_date, during_backtest=True):
+        def get_historical_data(self, col, table, codes, start_date, end_date, during_backtest=True):
             date_col = decide_date_col(table)
             if during_backtest:
                 end_date = self.verify_date(end_date)
+            
+            codes = self.verify_codes(codes)
 
-            if code is not None:
-                query = f"""
-                        select {date_col}, {col} 
-                        from {table} 
-                        where ts_code = '{code}' 
-                        and 
-                        {date_col} >= '{start_date}'
-                        and 
-                        {date_col} <= '{end_date}'
-                        """
-                df = pd.read_sql(query, self.conn)
-                df.set_index(date_col, inplace=True)
-            else:
-                query = f"""
-                        select ts_code, {date_col}, {col} 
-                        from {table} 
-                        where {date_col} >= '{start_date}' 
-                        and 
-                        {date_col} <= '{end_date}'
-                        """
-                df = pd.read_sql(query, self.conn)                
+            query = f"""
+                    select ts_code, {date_col}, {col} 
+                    from {table} 
+                    where ts_code in {tuple(codes)}
+                    and 
+                    {date_col} >= '{start_date}'
+                    and 
+                    {date_col} <= '{end_date}'
+                    """
+            df = pd.read_sql(query, self.conn)            
             return df
         
+        def get_historical_report_period_data(self, col, table, codes, start_date, end_date, report_type, during_backtest=True):
+            assert table in ['income', 'balancesheet', 'cashflow']
+            assert report_type in [1, 2, 3, 4]
+            date_col = decide_date_col(table)
+            if during_backtest:
+                end_date = self.verify_date(end_date)
+            codes = self.verify_codes(codes)
+
+            query = f"""
+                    select ts_code, {date_col}, end_date, {col} 
+                    from {table} 
+                    where ts_code in {tuple(codes)}
+                    and
+                    {date_col} >= '{start_date}' 
+                    and 
+                    {date_col} <= '{end_date}'
+                    and 
+                    end_type = '{report_type}'
+                    """
+            df = pd.read_sql(query, self.conn)
+            return df
+        
+        def get_daily_report_period_data(self, col, table, codes, date, report_type, during_backtest=True):
+            assert table in ['income', 'balancesheet', 'cashflow']
+            assert report_type in [1, 2, 3, 4]
+            date_col = decide_date_col(table)
+            if during_backtest:
+                date = self.verify_date(date)
+            codes = self.verify_codes(codes)
+            
+            query = f"""
+                    select *
+                    from {table} 
+                    where ts_code in {tuple(codes)}
+                    and
+                    {date_col} <= '{date}'
+                    and 
+                    end_type = '{report_type}'
+                    """
+            df = pd.read_sql(query, self.conn)
+            if col is not None:
+                df = df[['ts_code', date_col, 'end_date', col]]
+            df = df.groupby('ts_code').last()
+            #df.set_index('ts_code', inplace=True)
+            return df
+
+
         def get_stock_info(self, codes, date, during_backtest=True):
             if during_backtest:
                 date = self.verify_date(date)
@@ -282,7 +339,6 @@ class Database:
             df.drop('INSERT_TIME', axis=1, inplace=True)
             return df
         
-        # 判断停牌的方法有点粗糙
         def get_stock_trading_status(self, date, code, during_backtest=True):
             if during_backtest:
                 date = self.verify_date(date)
@@ -292,7 +348,8 @@ class Database:
             # 这个语句要求前面必须执行verify_date，否则date为None的时候会误判为停牌
             elif df['trade_date'].iloc[0] != date:
                 return False
-            elif df['pct_chg'].iloc[0] == 0:
+            # 如果当天涨跌幅为0，或者涨跌幅绝对值超过9%，就判断为“停牌”
+            elif df['pct_chg'].iloc[0] == 0 or abs(df['pct_chg'].iloc[0]) >= 9:
                     return False
             else:
                 return True
@@ -337,7 +394,7 @@ class Database:
             
         def get_index_component(self, index_code, date, during_backtest=True):
             if during_backtest:
-                self.verify_date(date)
+                date = self.verify_date(date)
             query = f"""
                 SELECT * 
                 FROM index_component 
@@ -439,7 +496,7 @@ class Database:
 
             # 获取最新数据
             local_scope = {}
-            exec(f'df = pro.{table}(ts_code="{code}", start_date="{start_date}", fields={fields})', globals(), local_scope)
+            exec(f'df = pro.{table}(ts_code="{code}", start_date="{start_date}", fields="{fields}")', globals(), local_scope)
             df = local_scope['df']
 
             self.general_update_func(table=table, id=code, id_col='ts_code', df=df)
