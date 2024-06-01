@@ -112,7 +112,6 @@ class Database:
         fields = (',').join(fields)
         return fields
     
-    
     def verify_codes(self, codes, date, during_backtest):
         if isinstance(codes, str):
             codes = [codes, 'just a place holder']
@@ -398,21 +397,29 @@ class Database:
             df.drop('INSERT_TIME', axis=1, inplace=True)
             return df
         
-        def get_stock_trading_status(self, date, code, during_backtest=True):
+        def get_stock_trading_status(self, date, codes, during_backtest=True):
             if during_backtest:
                 date = self.verify_date(date)
-            df = self.get_daily_data(col='pct_chg', table='stock_daily_price', codes=code, date=date, during_backtest=during_backtest)
-            if len(df) == 0:
-                return False
-            # 这个语句要求前面必须执行verify_date，否则date为None的时候会误判为停牌
-            elif df['trade_date'].iloc[0] != date:
-                return False
-            # 如果当天涨跌幅为0，或者涨跌幅绝对值超过9%，就判断为“停牌”
-            elif df['pct_chg'].iloc[0] == 0 or abs(df['pct_chg'].iloc[0]) >= 9:
-                    return False
-            else:
-                return True
-        
+            df = self.get_daily_data(col='pct_chg', table='stock_daily_price', codes=codes, date=date, during_backtest=during_backtest)
+            df['is_trading'] = True
+
+            if isinstance(codes, str):
+                codes = [codes]
+            result_df = pd.DataFrame(index=codes, columns=['is_trading'])
+            result_df['is_trading'] = True
+
+            # 条件1：如果没有获取到数据，则判断为停牌
+            for code in codes:
+                if code not in df.index:
+                    df.loc[code, :] = False
+            # 条件2：如果最新的交易日期与指定日期不同，则判断为停牌
+            idx = df[df['trade_date'] != date].index
+            df.loc[idx, 'is_trading'] = False
+            # 条件3：如果涨跌幅为0，或者涨跌幅绝对值超过9%，就判断为“停牌”
+            idx = df[(df['pct_chg'] == 0) | (abs(df['pct_chg']) >= 9)].index
+            df.loc[idx, 'is_trading'] = False
+            return df['is_trading']
+            
         '''
         def get_index_component(self, index_code, date, during_backtest=True):
             if during_backtest:
@@ -611,29 +618,27 @@ class Junnko_Backtest(Database):
     def __init__(self):
         super().__init__()
     
-    def buy(self, code, shares):
-        price = self.get_daily_data('close', 'stock_daily_price_hfq', code, None)
-        if code in price.index:
-            price = price.loc[code, 'close']
-            money = price * shares * (1+self.commission_rate)
-            if money > self.cash:
-                money = self.cash
-                shares = money / (price * (1+self.commission_rate))
+    def _buy(self, code, shares):
+        price = self.order_data['price'].loc[code, 'close']
+        money = price * shares * (1+self.commission_rate)
+        if money > self.cash:
+            money = self.cash
+            shares = money / (price * (1+self.commission_rate))
 
-            shares = shares//100*100
-            if shares > 0:
-                commission = shares*price*self.commission_rate
-                self.cash -= shares*price
-                self.cash -= commission
+        shares = shares//100*100
+        if shares > 0:
+            commission = shares*price*self.commission_rate
+            self.cash -= shares*price
+            self.cash -= commission
 
-                if code in self.position.keys():
-                    self.position[code] += shares
-                else:
-                    self.position[code] = shares
-            
-                print(f'{self.current_date} 买入{code} {shares}股 手续费{commission}')
+            if code in self.position.keys():
+                self.position[code] += shares
+            else:
+                self.position[code] = shares
+        
+            print(f'{self.current_date} 买入{code} {shares}股 手续费{commission}')
     
-    def sell(self, code, shares):
+    def _sell(self, code, shares):
         if code in self.position.keys():
             current_position = self.position[code]
             if shares > current_position:
@@ -641,43 +646,63 @@ class Junnko_Backtest(Database):
             
             shares = shares//100*100
             if shares > 0:
-                price = self.get_daily_data('close', 'stock_daily_price_hfq', code, None)
-                if code in price.index:
-                    price = price.loc[code, 'close']
-                    self.cash += shares*price
-                    commision = shares*price*self.commission_rate
-                    self.cash -= commision
-                    self.position[code] -= shares
-                    if self.position[code] == 0:
-                        self.position.pop(code)
-                    print(f'{self.current_date} 卖出{code} {shares}股 手续费{commision}')
+                price = self.order_data['price'].loc[code, 'close']
+                self.cash += shares*price
+                commision = shares*price*self.commission_rate
+                self.cash -= commision
+                self.position[code] -= shares
+                if self.position[code] == 0:
+                    self.position.pop(code)
+                print(f'{self.current_date} 卖出{code} {shares}股 手续费{commision}')
     
-    def order(self, code, shares):
-        if self.get_stock_trading_status(code=code, date=None):
+    def _order(self, code, shares):
+        if self.order_data['trading_status'].loc[code, 'is_trading']:
             if shares > 0:
-                self.buy(code, shares)
+                self._buy(code, shares)
             elif shares < 0:
-                self.sell(code, -shares)
+                self._sell(code, -shares)
     
-    def order_target_shares(self, code, target_shares):
+    def _order_target_shares(self, code, target_shares):
         if code in self.position.keys():
             current_position = self.position[code]
         else:
             current_position = 0
         shares = target_shares - current_position
-        self.order(code, shares)
+        self._order(code, shares)
     
-    def order_target_value(self, code, target_value):
+    def _order_target_value(self, code, target_value):
         if code in self.position.keys():
             current_position = self.position[code]
         else:
             current_position = 0
-        if self.get_stock_trading_status(code=code, date=None):
-            current_price = self.get_daily_data('open', 'stock_daily_price_hfq', code, None).loc[code, 'open']
+        if self.order_data['trading_status'].loc[code, 'is_trading']:
+            current_price = self.order_data['price'].loc[code, 'open']
             target_shares = target_value // current_price
             shares = target_shares - current_position
-            self.order(code, shares)
+            self._order(code, shares)
+
+    def execute_orders(self):
+        order_codes = [item[1] for item in self.undo_orders]
+        self.order_data['price'] = self.get_daily_data(col=['open', 'close'], table='stock_daily_price_hfq', codes=order_codes, date=None)
+        self.order_data['trading_status'] = self.get_stock_trading_status(date=None, codes=order_codes)
+        for order_type, order_code, order_amount in self.undo_orders:
+            if order_type == 'order':
+                self.order(order_code, order_amount)
+            elif order_type == 'order_target_shares':
+                self.order_target_shares(order_code, order_amount)
+            elif order_type == 'order_target_value':
+                self.order_target_value(order_code, order_amount)
     
+    def order(self, code, shares):
+        self.undo_orders.append(('order', code, shares))
+    
+    def order_target_shares(self, code, target_shares):
+        self.undo_orders.append(('order_target_shares', code, target_shares))
+    
+    def order_target_value(self, code, target_value):
+        self.undo_orders.append(('order_target_value', code, target_value))
+
+
     def calculate_net_value(self):
         net_value = self.cash
         codes = list(self.position.keys())
@@ -695,8 +720,11 @@ class Junnko_Backtest(Database):
         self.commission_rate = commission_rate
         self.position = {}
         for i in tqdm(range(len(all_dates)), desc='回测进行中'):
+            self.undo_orders = []
+            self.order_data = {}
             self.current_date = all_dates[i]
             self.strategy(self)
+            self.execute_orders()
             net_value = self.calculate_net_value()
             yield i, self.cash, net_value
     
