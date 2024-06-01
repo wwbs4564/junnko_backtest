@@ -404,9 +404,7 @@ class Database:
             df['is_trading'] = True
 
             if isinstance(codes, str):
-                codes = [codes]
-            result_df = pd.DataFrame(index=codes, columns=['is_trading'])
-            result_df['is_trading'] = True
+                codes = [codes]            
 
             # 条件1：如果没有获取到数据，则判断为停牌
             for code in codes:
@@ -418,7 +416,7 @@ class Database:
             # 条件3：如果涨跌幅为0，或者涨跌幅绝对值超过9%，就判断为“停牌”
             idx = df[(df['pct_chg'] == 0) | (abs(df['pct_chg']) >= 9)].index
             df.loc[idx, 'is_trading'] = False
-            return df['is_trading']
+            return df[['is_trading']]
             
         '''
         def get_index_component(self, index_code, date, during_backtest=True):
