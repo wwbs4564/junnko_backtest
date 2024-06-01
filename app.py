@@ -85,8 +85,8 @@ def my_strategy(self):
             with plot_placeholder:
                 tmp_df = event_backtest_result.dropna()
                 fig = go.Figure()
-                fig.add_trace(go.Line(name='策略', x=tmp_df.index, y=tmp_df['策略']/tmp_df['策略'].iloc[0]))
-                fig.add_trace(go.Line(name='基准', x=tmp_df.index, y=tmp_df['基准']/tmp_df['基准'].iloc[0]))
+                fig.add_trace(go.Scatter(name='策略', x=tmp_df.index, y=tmp_df['策略']/tmp_df['策略'].iloc[0], mode='lines'))
+                fig.add_trace(go.Scatter(name='基准', x=tmp_df.index, y=tmp_df['基准']/tmp_df['基准'].iloc[0], mode='lines'))
                 st.write(fig)
         
         metrics = calc_metrics(event_backtest_result['策略'].pct_change(), event_backtest_result['基准'].pct_change())
