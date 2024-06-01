@@ -113,13 +113,13 @@ class Database:
         return fields
     
     
-    def verify_codes(self, codes):
+    def verify_codes(self, codes, date, during_backtest):
         if isinstance(codes, str):
             codes = [codes, 'just a place holder']
         elif isinstance(codes, list) and len(codes) == 1:
             codes.append('just a place holder')
         elif codes is None:
-            codes = self.get_stock_info(codes=None).index.to_list()
+            codes = self.get_stock_info(codes=None, date=date, during_backtest=during_backtest).index.to_list()
         codes = [map_code(code) for code in codes]
         return codes
 
@@ -186,62 +186,145 @@ class Database:
                             final_df.loc[code, ttm_col] = final_df.loc[code, col] + last_year_2q_3q_4q_data
             return final_df
                     
-
         def get_daily_data(self, col, table, codes, date, during_backtest=True):
             date_col = decide_date_col(table)
             if during_backtest:
                 date = self.verify_date(date)
 
-            codes = self.verify_codes(codes)
-            
+            codes = self.verify_codes(codes=codes, date=date, during_backtest=during_backtest)
+
+            if col is None:
+                part_query = '*'
+            elif isinstance(col, str):
+                part_query = col
+            elif isinstance(col, list):
+                part_query = ', '.join(col)
+
             query = f"""
-                    select *
-                    from {table} 
-                    where ts_code in {tuple(codes)} 
-                    and 
-                    {date_col} <= '{date}'
+                    SELECT DISTINCT TABLE1.ts_code, {date_col}, {part_query}
+                    FROM
+                        (SELECT ts_code, max({date_col}) AS max_{date_col}
+                        FROM {table}
+                        WHERE ts_code IN {tuple(codes)} 
+                        AND
+                        {date_col} <= '{date}'
+                        GROUP BY ts_code) AS TABLE1
+                    INNER JOIN
+                        (SELECT ts_code, {date_col}, {part_query}
+                        FROM {table}
+                        WHERE ts_code IN {tuple(codes)} 
+                        AND
+                        {date_col} <= '{date}') AS TABLE2
+                    ON TABLE1.ts_code = TABLE2.ts_code
+                    AND
+                    TABLE1.max_{date_col} = TABLE2.{date_col}
+                    """
+            # if col is None:
+            #     part_query = '*'
+            # elif isinstance(col, str):
+            #     part_query = f'ts_code, {date_col}, {col}'
+            # elif isinstance(col, list):
+            #     part_query = f'ts_code, {date_col}, {', '.join(col)}'
+            
+            # query = f"""
+            #         select {part_query}
+            #         from {table} 
+            #         where ts_code in {tuple(codes)} 
+            #         and
+            #         {date_col} <= '{date}'
+            #         """
+                
+            df = pd.read_sql(query, self.conn)
+            #df = df.groupby('ts_code').last()
+            return df.set_index('ts_code')
+        
+        def get_daily_report_data(self, col, table, codes, date, report_type, during_backtest=True):
+            assert table in ['income', 'balancesheet', 'cashflow']
+            assert report_type in [1, 2, 3, 4]
+            date_col = decide_date_col(table)
+            if during_backtest:
+                date = self.verify_date(date)
+            codes = self.verify_codes(codes=codes, date=date, during_backtest=during_backtest)
+
+            # if col is None:
+            #     part_query = '*'
+            # elif isinstance(col, str):
+            #     part_query = f'ts_code, {date_col}, end_date, {col}'
+            # elif isinstance(col, list):
+            #     part_query = f'ts_code, {date_col}, end_date, {', '.join(col)}'
+            # query = f"""
+            #         select {part_query}
+            #         from {table} 
+            #         where ts_code in {tuple(codes)}
+            #         and
+            #         {date_col} <= '{date}'
+            #         and 
+            #         end_type = '{report_type}'
+            #         order by ts_code, {date_col} asc
+            #         """
+            if col is None:
+                part_query = '*'
+            elif isinstance(col, str):
+                part_query = col
+            elif isinstance(col, list):
+                part_query = ', '.join(col)
+            query = f"""
+                    SELECT DISTINCT TABLE1.ts_code, {date_col}, end_date, {part_query}
+                    FROM
+                        (SELECT ts_code, max({date_col}) AS max_{date_col}
+                        FROM {table}
+                        WHERE ts_code IN {tuple(codes)} 
+                        AND
+                        {date_col} <= '{date}'
+                        AND
+                        end_type = '{report_type}'
+                        GROUP BY ts_code) AS TABLE1
+                    INNER JOIN
+                        (SELECT ts_code, {date_col}, end_date, {part_query}
+                        FROM {table}
+                        WHERE ts_code IN {tuple(codes)} 
+                        AND
+                        {date_col} <= '{date}'
+                        AND
+                        end_type = '{report_type}') AS TABLE2
+                    ON TABLE1.ts_code = TABLE2.ts_code
+                    AND
+                    TABLE1.max_{date_col} = TABLE2.{date_col}
                     """
             df = pd.read_sql(query, self.conn)
-            if col is not None:
-                df = df[['ts_code', date_col, col]]
-            # cols_to_keep = get_primary_key(table, self.conn)
-            # if col not in cols_to_keep:
-            #     cols_to_keep.append(col)
-            # if date_col not in cols_to_keep:
-            #     cols_to_keep.append(date_col)
-            # df = df[cols_to_keep]
-            df = df.groupby('ts_code').last()
-            return df
-        
+            #df = df.groupby('ts_code').last()
+            return df.set_index('ts_code')
+
         def get_historical_data(self, col, table, codes, start_date, end_date, during_backtest=True):
             date_col = decide_date_col(table)
             if during_backtest:
                 end_date = self.verify_date(end_date)
             
-            codes = self.verify_codes(codes)
+            codes = self.verify_codes(codes=codes, date=end_date, during_backtest=during_backtest)
 
             query = f"""
-                    select ts_code, {date_col}, {col} 
+                    select DISTINCT ts_code, {date_col}, {col} 
                     from {table} 
                     where ts_code in {tuple(codes)}
                     and 
                     {date_col} >= '{start_date}'
                     and 
                     {date_col} <= '{end_date}'
+                    order by ts_code, {date_col} asc
                     """
-            df = pd.read_sql(query, self.conn)            
+            df = pd.read_sql(query, self.conn)
             return df
         
-        def get_historical_report_period_data(self, col, table, codes, start_date, end_date, report_type, during_backtest=True):
+        def get_historical_report_data(self, col, table, codes, start_date, end_date, report_type, during_backtest=True):
             assert table in ['income', 'balancesheet', 'cashflow']
             assert report_type in [1, 2, 3, 4]
             date_col = decide_date_col(table)
             if during_backtest:
                 end_date = self.verify_date(end_date)
-            codes = self.verify_codes(codes)
+            codes = self.verify_codes(codes=codes, date=end_date, during_backtest=during_backtest)
 
             query = f"""
-                    select ts_code, {date_col}, end_date, {col} 
+                    select DISTINCT ts_code, {date_col}, end_date, {col} 
                     from {table} 
                     where ts_code in {tuple(codes)}
                     and
@@ -250,34 +333,10 @@ class Database:
                     {date_col} <= '{end_date}'
                     and 
                     end_type = '{report_type}'
+                    order by ts_code, {date_col} asc
                     """
             df = pd.read_sql(query, self.conn)
             return df
-        
-        def get_daily_report_period_data(self, col, table, codes, date, report_type, during_backtest=True):
-            assert table in ['income', 'balancesheet', 'cashflow']
-            assert report_type in [1, 2, 3, 4]
-            date_col = decide_date_col(table)
-            if during_backtest:
-                date = self.verify_date(date)
-            codes = self.verify_codes(codes)
-            
-            query = f"""
-                    select *
-                    from {table} 
-                    where ts_code in {tuple(codes)}
-                    and
-                    {date_col} <= '{date}'
-                    and 
-                    end_type = '{report_type}'
-                    """
-            df = pd.read_sql(query, self.conn)
-            if col is not None:
-                df = df[['ts_code', date_col, 'end_date', col]]
-            df = df.groupby('ts_code').last()
-            #df.set_index('ts_code', inplace=True)
-            return df
-
 
         def get_stock_info(self, codes, date, during_backtest=True):
             if during_backtest:
@@ -342,7 +401,7 @@ class Database:
         def get_stock_trading_status(self, date, code, during_backtest=True):
             if during_backtest:
                 date = self.verify_date(date)
-            df = self.get_daily_data(col='pct_chg', table='stock_daily_price', codes=code, date=date)
+            df = self.get_daily_data(col='pct_chg', table='stock_daily_price', codes=code, date=date, during_backtest=during_backtest)
             if len(df) == 0:
                 return False
             # 这个语句要求前面必须执行verify_date，否则date为None的时候会误判为停牌
@@ -621,8 +680,12 @@ class Junnko_Backtest(Database):
     
     def calculate_net_value(self):
         net_value = self.cash
-        for code in self.position.keys():
-            net_value += self.position[code] * self.get_daily_data(col='close', table='stock_daily_price_hfq', codes=code, date = None).loc[code, 'close']
+        codes = list(self.position.keys())
+        prices = self.get_daily_data(col='close', table='stock_daily_price_hfq', codes=codes, date=None)
+        position_df = pd.DataFrame(index=codes, columns=['shares', 'price'])
+        position_df['shares'] = [self.position[code] for code in codes]
+        position_df['price'] = [prices.loc[code, 'close'] for code in codes]
+        net_value += (position_df['shares']*position_df['price']).sum()
         return net_value
 
     def run_event_backtest(self, start_date, end_date, initial_capital, commission_rate, strategy):

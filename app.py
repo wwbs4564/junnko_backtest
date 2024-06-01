@@ -8,6 +8,9 @@ from pyecharts.globals import CurrentConfig, NotebookType
 from stqdm import stqdm
 from streamlit_ace import st_ace
 import empyrical
+import gc
+import plotly.graph_objects as go
+import plotly.io as pio
 
 
 backtest = Junnko_Backtest()
@@ -72,28 +75,19 @@ def my_strategy(self):
         strategy = globals()['my_strategy']
         all_dates = pd.date_range(event_backtest_start_date, event_backtest_end_date)
         event_backtest_result = pd.DataFrame(index=all_dates, columns=["现金", "策略", '基准'])
-
+            
         # 执行回测并动态更新图表
         for date_idx, cash, net_value in backtest.run_event_backtest(event_backtest_start_date.strftime('%Y%m%d'), event_backtest_end_date.strftime('%Y%m%d'), event_backtest_initial_capital, event_backtest_commission_rate/1000, strategy):
             event_backtest_result.loc[all_dates[date_idx], "现金"] = cash
             event_backtest_result.loc[all_dates[date_idx], "策略"] = net_value
             event_backtest_result.loc[all_dates[date_idx], "基准"] = backtest.get_daily_data(col='close', table='index_daily_price', codes=event_backtest_benchmark, date=None)['close'].iloc[0]
-            
-        line = (
-            Line()
-            .add_xaxis(list(event_backtest_result.index.strftime("%Y-%m-%d")))
-            .add_yaxis("资产净值", list(event_backtest_result["策略"]/event_backtest_result['策略'].iloc[0]))
-            .add_yaxis("基准", list(event_backtest_result["基准"]/event_backtest_result['基准'].iloc[0]))
-            .set_global_opts(
-                xaxis_opts=opts.AxisOpts(type_="category", boundary_gap=False),
-                yaxis_opts=opts.AxisOpts(type_="value"),
-                tooltip_opts=opts.TooltipOpts(trigger="axis", axis_pointer_type="cross"),
-                datazoom_opts=[opts.DataZoomOpts(type_="inside", range_start=0, range_end=100), opts.DataZoomOpts(type_="slider", range_start=0, range_end=100)]
-            )
-        )
-        with plot_placeholder:
-            with st.container(height=500):
-                st_pyecharts(line, height=500)
+
+            with plot_placeholder:
+                tmp_df = event_backtest_result.dropna()
+                fig = go.Figure()
+                fig.add_trace(go.Line(name='策略', x=tmp_df.index, y=tmp_df['策略']/tmp_df['策略'].iloc[0]))
+                fig.add_trace(go.Line(name='基准', x=tmp_df.index, y=tmp_df['基准']/tmp_df['基准'].iloc[0]))
+                st.write(fig)
         
         metrics = calc_metrics(event_backtest_result['策略'].pct_change(), event_backtest_result['基准'].pct_change())
         with metric_placeholder:
@@ -119,7 +113,8 @@ def my_strategy(self):
         with open(f'event_result/{event_backtest_name}/strategy.py', 'w') as f:
             f.write(strategy_code)
         # 保存回测结果图（html格式）
-        line.render(f'event_result/{event_backtest_name}/backtest_result.html')
+        #line.render(f'event_result/{event_backtest_name}/backtest_result.html')
+        pio.write_html(fig, f'event_result/{event_backtest_name}/backtest_result.html')
         # 保存回测结果表格（xlsx格式）
         event_backtest_result.to_excel(f'event_result/{event_backtest_name}/backtest_result.xlsx')
         # 保存回测结果指标（xlsx格式）
@@ -253,8 +248,6 @@ with data_tab:
         query = f"SELECT DISTINCT ts_code FROM {selected_table}"
         all_codes = pd.read_sql(query, backtest.conn)['ts_code'].tolist()
         selected_code = st.selectbox("请选择一个代码:", all_codes, index=0)
-        if selected_code is None:
-            selected_code = st.text_input("请输入一个代码:", value='000001.SZ')
 
         query = f"SELECT * FROM {selected_table} WHERE ts_code = '{selected_code}'"
         if selected_table in ['income', 'balancesheet', 'cashflow']:
