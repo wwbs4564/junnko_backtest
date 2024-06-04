@@ -14,6 +14,8 @@ from functools import wraps
 from stqdm import stqdm
 import warnings
 warnings.filterwarnings('ignore')
+from functools import lru_cache
+
 
 with open('token.txt', 'r') as f:
     TS_TOKEN = f.read()
@@ -96,6 +98,7 @@ class Database:
     def __init__(self):
         self.conn = sqlite3.connect(DB_PATH)
         self.cursor = self.conn.cursor()
+        self.cursor.execute('PRAGMA cache_size = -2000000')
     
     def verify_date(self, date):
         if date is None:
@@ -119,7 +122,7 @@ class Database:
             codes.append('just a place holder')
         elif codes is None:
             codes = self.get_stock_info(codes=None, date=date, during_backtest=during_backtest).index.to_list()
-        codes = [map_code(code) for code in codes]
+        #codes = [map_code(code) for code in codes]
         return codes
 
     if '获取数据':
@@ -184,7 +187,7 @@ class Database:
                             last_year_2q_3q_4q_data = last_year_fourth_report[col].iloc[0] - last_year_first_report[col].iloc[0]
                             final_df.loc[code, ttm_col] = final_df.loc[code, col] + last_year_2q_3q_4q_data
             return final_df
-                    
+        
         def get_daily_data(self, col, table, codes, date, during_backtest=True):
             date_col = decide_date_col(table)
             if during_backtest:
@@ -300,9 +303,14 @@ class Database:
                 end_date = self.verify_date(end_date)
             
             codes = self.verify_codes(codes=codes, date=end_date, during_backtest=during_backtest)
-
+            if col is None:
+                part_query = '*'
+            elif isinstance(col, str):
+                part_query = col
+            elif isinstance(col, list):
+                part_query = ', '.join(col)
             query = f"""
-                    select DISTINCT ts_code, {date_col}, {col} 
+                    select DISTINCT ts_code, {date_col}, {part_query} 
                     from {table} 
                     where ts_code in {tuple(codes)}
                     and 
@@ -322,8 +330,14 @@ class Database:
                 end_date = self.verify_date(end_date)
             codes = self.verify_codes(codes=codes, date=end_date, during_backtest=during_backtest)
 
+            if col is None:
+                part_query = '*'
+            elif isinstance(col, str):
+                part_query = col
+            elif isinstance(col, list):
+                part_query = ', '.join(col)
             query = f"""
-                    select DISTINCT ts_code, {date_col}, end_date, {col} 
+                    select DISTINCT ts_code, {date_col}, end_date, {part_query} 
                     from {table} 
                     where ts_code in {tuple(codes)}
                     and
@@ -739,6 +753,7 @@ class Junnko_Backtest(Database):
                 position[(factor_rank > cut*group) & (factor_rank <= cut*(group+1))] = True
             positions[group] = position
         
+        
         if freq != 'D':
             print('正在按持仓频率调整持仓')
             for group in tqdm(range(num_groups)):
@@ -751,4 +766,5 @@ class Junnko_Backtest(Database):
         for group in tqdm(range(num_groups)):
             group_ret = stock_daily_ret.loc[start_date:end_date][positions[group]].mean(axis=1, skipna=True)
             group_rets[group] = group_ret
+        group_rets['多空'] = (group_rets[num_groups-1] - group_rets[0])/2
         return group_rets

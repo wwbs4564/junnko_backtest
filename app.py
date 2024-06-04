@@ -11,85 +11,95 @@ import empyrical
 import gc
 import plotly.graph_objects as go
 import plotly.io as pio
+import quantstats as qs
+import base64
 
 
 backtest = Junnko_Backtest()
 
-st.logo('logo.bmp')
-st.header("Junnko Backtest")
-st.header('Author: wwbs')
-
 event_tab, factor_tab, data_tab, test_tab = st.tabs(["事件化回测", "向量化回测", '数据检视', '调试'])
 
-with event_tab:
-    event_backtest_name = st.text_input("策略名称（不要重复）:", value='沪深300中ROE前60')
-    col1, col2 = st.columns(2)
-    col3, col4 = st.columns(2)
+with st.sidebar:
+    st.logo('logo.bmp')
+    st.header("Junnko Backtest")
+    st.header('Author: wwbs')
+    backtest_start_date = st.date_input("开始日期:", value=pd.to_datetime("2010-01-01"))
+    backtest_end_date = st.date_input("结束日期:", value=pd.to_datetime("2024-01-01")) 
+    backtest_benchmark = st.text_input("基准", value='399300.SZ')
 
-    event_backtest_benchmark = st.text_input("基准", value='399300.SZ')
+with event_tab:
+    
+    col1, col2, col3 = st.columns(3)
     event_backtest_start = st.button("运行回测")
-    strategy_expander = st.expander('在此编写策略')
 
     metric_placeholder = st.container()
     plot_placeholder = st.empty()
     table_placeholder = st.expander('回测结果表格')
 
+    strategy_expander = st.expander('在此编写策略')
+
+    
     with col1:
-        event_backtest_start_date = st.date_input("开始日期:", value=pd.to_datetime("2010-01-01"))
+        event_backtest_name = st.text_input("策略名称（不要重复）:", value='沪深300中ROE前60')
     with col2:
-        event_backtest_end_date = st.date_input("结束日期:", value=pd.to_datetime("2020-01-01")) 
-    with col3:
         event_backtest_initial_capital = st.number_input("初始资金:", min_value=0, value=1000000)
-    with col4:
+    with col3:
         event_backtest_commission_rate = st.number_input("交易费率（单位为千分之一）:", min_value=0, value=4)
     
 
     with strategy_expander:
         event_tab_wrap = st.checkbox('代码过长自动换行', key=1)
-        strategy_code = st_ace(value='''# 持有沪深300中ROE前60的股票
+        strategy_code = st_ace(value='''# 持有沪深300中（年度）ROE前60的股票
 def my_strategy(self):
-    # 判断当天是否是当月第一个交易日
-    trade_cal = self.get_trade_cal(exchange='SSE')
-    trade_cal = trade_cal[trade_cal['is_open']==1]
-    latest_trade_date = trade_cal['cal_date'].max()
-    part_trade_cal = trade_cal[trade_cal['cal_date'].str.contains(latest_trade_date[:6])]
-    if len(part_trade_cal) == 1:
-        codes = self.get_index_component(index_code='399300.SZ', date=None)['con_code'].tolist()
-        net_profit = self.get_daily_data(codes=codes, col='n_income', table='income', date=None)
-        equity = self.get_daily_data(codes=codes, col='total_hldr_eqy_inc_min_int', table='balancesheet', date=None)
-        roe = net_profit['n_income'] / equity['total_hldr_eqy_inc_min_int']
-        roe = roe.sort_values(ascending=False)
-        top_60_roe = roe.index.tolist()[:60]
-        current_position = list(self.position.keys())
-        for code in current_position:
-            if code not in top_60_roe:
-                self.order_target_shares(code, 0)
-        net_value = self.calculate_net_value()
-        for code in top_60_roe:
-            self.order_target_value(code, net_value/60)
+    if self.current_date.month in [5, 11]:
+        # 判断当天是否是当月第一个交易日
+        trade_cal = self.get_trade_cal(exchange='SSE')
+        trade_cal = trade_cal[trade_cal['is_open']==1]
+        latest_trade_date = trade_cal['cal_date'].iloc[-1]
+        part_trade_cal = trade_cal[trade_cal['cal_date'].str.contains(latest_trade_date[:6])]
+        if len(part_trade_cal) == 1:
+            codes = self.get_index_component(index_code='399300.SZ', date=None)['con_code'].tolist()
+            net_profit = self.get_daily_report_data(codes=codes, col='n_income', table='income', date=None, report_type=4)
+            equity = self.get_daily_report_data(codes=codes, col='total_hldr_eqy_inc_min_int', table='balancesheet', date=None, report_type=4)
+            roe = net_profit['n_income'] / equity['total_hldr_eqy_inc_min_int']
+            roe = roe.sort_values(ascending=False)
+            top_60_roe = roe.index.tolist()[:60]
+            current_position = list(self.position.keys())
+            for code in current_position:
+                if code not in top_60_roe:
+                    self.order_target_shares(code, 0)
+            market_value = self.get_daily_data(col='circ_mv', table='stock_daily_basic', codes = top_60_roe, date=None)
+            net_value = self.calculate_net_value()
+            for code in top_60_roe:
+                self.order_target_value(code, net_value*(market_value.loc[code, 'circ_mv']/market_value['circ_mv'].sum()))
                 ''', language='python', auto_update=True, font_size=20, wrap=event_tab_wrap)
     
     if event_backtest_start:
         # 动态定义策略函数
         exec(strategy_code, globals())
         strategy = globals()['my_strategy']
-        all_dates = pd.date_range(event_backtest_start_date, event_backtest_end_date)
-        event_backtest_result = pd.DataFrame(index=all_dates, columns=["现金", "策略", '基准'])
+        all_dates = pd.date_range(backtest_start_date, backtest_end_date)
+        event_backtest_result = pd.DataFrame(columns=["现金", "策略", backtest_benchmark,
+                                    '现金_标准化', '策略_标准化', f'{backtest_benchmark}_标准化'])
             
         # 执行回测并动态更新图表
-        for date_idx, cash, net_value in backtest.run_event_backtest(event_backtest_start_date.strftime('%Y%m%d'), event_backtest_end_date.strftime('%Y%m%d'), event_backtest_initial_capital, event_backtest_commission_rate/1000, strategy):
-            event_backtest_result.loc[all_dates[date_idx], "现金"] = cash
-            event_backtest_result.loc[all_dates[date_idx], "策略"] = net_value
-            event_backtest_result.loc[all_dates[date_idx], "基准"] = backtest.get_daily_data(col='close', table='index_daily_price', codes=event_backtest_benchmark, date=None)['close'].iloc[0]
+        for date_idx, cash, net_value in backtest.run_event_backtest(backtest_start_date.strftime('%Y%m%d'), backtest_end_date.strftime('%Y%m%d'), event_backtest_initial_capital, event_backtest_commission_rate/1000, strategy):
+            benchmark_value = backtest.get_daily_data(col='close', table='index_daily_price', codes=backtest_benchmark, date=None)['close'].iloc[0]
+            event_backtest_result.loc[all_dates[date_idx], ["现金", "策略", backtest_benchmark]] = [cash, net_value, benchmark_value]
+            event_backtest_result.loc[all_dates[date_idx], ['现金_标准化', '策略_标准化', f'{backtest_benchmark}_标准化']] = [cash/event_backtest_initial_capital, net_value/event_backtest_initial_capital, benchmark_value/event_backtest_result.iloc[0][backtest_benchmark]]            
 
+            
             with plot_placeholder:
-                tmp_df = event_backtest_result.dropna()
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(name='策略', x=tmp_df.index, y=tmp_df['策略']/tmp_df['策略'].iloc[0], mode='lines'))
-                fig.add_trace(go.Scatter(name='基准', x=tmp_df.index, y=tmp_df['基准']/tmp_df['基准'].iloc[0], mode='lines'))
-                st.write(fig)
-        
-        metrics = calc_metrics(event_backtest_result['策略'].pct_change(), event_backtest_result['基准'].pct_change())
+                with st.container(height=500):
+                    fig = go.Figure()
+                    fig.add_trace(go.Scatter(name='策略', x=event_backtest_result.index, y=event_backtest_result['策略_标准化'], mode='lines'))
+                    fig.add_trace(go.Scatter(name=backtest_benchmark, x=event_backtest_result.index, y=event_backtest_result[f'{backtest_benchmark}_标准化'], mode='lines'))
+                    fig.add_trace(go.Scatter(name='现金', x=event_backtest_result.index, y=event_backtest_result['现金_标准化'], mode='lines'))
+                    st.write(fig)
+                    # if date_idx % 50 == 0:
+                    #     plot_placeholder.empty()
+
+        metrics = calc_metrics(event_backtest_result['策略'].pct_change(), event_backtest_result[backtest_benchmark].pct_change())
         with metric_placeholder:
             annual_ret_col, annual_vol_col = st.columns(2)
             cum_ret_col, excess_cum_ret_col, sharpe_ret_col = st.columns(3)
@@ -110,58 +120,66 @@ def my_strategy(self):
 
         os.makedirs(f'event_result/{event_backtest_name}')
         # 保存策略代码
-        with open(f'event_result/{event_backtest_name}/strategy.py', 'w') as f:
+        with open(f'event_result/{event_backtest_name}/strategy.txt', 'w') as f:
             f.write(strategy_code)
         # 保存回测结果图（html格式）
-        #line.render(f'event_result/{event_backtest_name}/backtest_result.html')
-        pio.write_html(fig, f'event_result/{event_backtest_name}/backtest_result.html')
+        line = (
+                Line()
+                .add_xaxis(list(event_backtest_result.index.strftime("%Y-%m-%d")))
+                .set_global_opts(
+                    xaxis_opts=opts.AxisOpts(type_="category", boundary_gap=False),
+                    yaxis_opts=opts.AxisOpts(type_="value"),
+                    tooltip_opts=opts.TooltipOpts(trigger="axis", axis_pointer_type="cross"),
+                    datazoom_opts=[opts.DataZoomOpts(type_="inside", range_start=0, range_end=100), opts.DataZoomOpts(type_="slider", range_start=0, range_end=100)]
+                )
+            )
+        for col in ['现金_标准化', '策略_标准化', f'{backtest_benchmark}_标准化']:
+            line.add_yaxis(col.replace('_标准化', ''), event_backtest_result[col], label_opts=opts.LabelOpts(is_show=False))
+        line.render(f'event_result/{event_backtest_name}/backtest_result.html')
+        #pio.write_html(fig, f'event_result/{event_backtest_name}/backtest_result.html')
         # 保存回测结果表格（xlsx格式）
         event_backtest_result.to_excel(f'event_result/{event_backtest_name}/backtest_result.xlsx')
         # 保存回测结果指标（xlsx格式）
         metrics.to_excel(f'event_result/{event_backtest_name}/metrics.xlsx')
+        # 生成quantstats报告
+        qs.reports.html(event_backtest_result['策略'].pct_change(), event_backtest_result[backtest_benchmark].pct_change(), output=f'event_result/{event_backtest_name}/quantstats.html')
 
 with factor_tab:
-    factor_backtest_name = st.text_input("因子名称（不要重复）:", value='ROE')
-    col1, col2 = st.columns(2)
-    col3, col4 = st.columns(2)
-    col5, col6 = st.columns(2)
+    factor_backtest_start = st.button("运行回测", key='factor_start')
+    
+    col1, col2, col3, col4 = st.columns(4)
     factor_file = st.file_uploader("上传因子文件", type=['parquet'])
-    factor_backtest_start = st.button("运行回测", key='factor_start_backtest')
 
     metric_placeholder = st.container()
     plot_placeholder = st.empty()
     table_placeholder = st.expander('回测结果表格')
 
     with col1:
-        factor_backtest_start_date = st.date_input("开始日期:", value=pd.to_datetime("2010-01-01"), key='factor_start_date')
+        factor_backtest_name = st.text_input("因子名称（不要重复）:", value='ROE')
     with col2:
-        factor_backtest_end_date = st.date_input("结束日期:", value=pd.to_datetime("2020-01-01"), key='factor_end_date')
-    with col3:
         factor_backtest_num_groups = st.number_input("分组数量:", min_value=0, value=5)
-    with col4:
+    with col3:
         factor_backtest_freq = st.selectbox("调仓频率:", ['D', 'W', 'M', 'Q', 'Y'], index=2)
-    with col5:
-        factor_backtest_benchmark = st.text_input("基准:", value='399300.SZ', key='factor_benchmark')
-    with col6:
+    with col4:
         factor_backtest_stock_pool = st.text_input("股票池:", value='399300.SZ')
     
     if factor_backtest_start:
         factor = pd.read_parquet(factor_file)
         factor_backtest_result = backtest.run_factor_backtest(
-            start_date=factor_backtest_start_date.strftime('%Y%m%d'), 
-            end_date=factor_backtest_end_date.strftime('%Y%m%d'),
+            start_date=backtest_start_date.strftime('%Y%m%d'), 
+            end_date=backtest_end_date.strftime('%Y%m%d'),
             freq=factor_backtest_freq,
             factor=factor,
             num_groups=factor_backtest_num_groups,
             stock_pool=factor_backtest_stock_pool
             )
-        benchmark_daily_price = backtest.get_historical_data(col='close', table='index_daily_price', code=factor_backtest_benchmark, start_date=factor_backtest_start_date, end_date=factor_backtest_end_date, during_backtest=False).drop('ts_code', axis=1)
-        benchmark_daily_price.index = pd.to_datetime(benchmark_daily_price.index)
-        benchmark_daily_price = benchmark_daily_price.reindex(pd.date_range(start=factor_backtest_start_date, end=factor_backtest_end_date, freq=factor_backtest_freq), method='ffill')
-        factor_backtest_result['基准'] = benchmark_daily_price['close'].pct_change()
+        benchmark_daily_price = backtest.get_historical_data(col='close', table='index_daily_price', codes=backtest_benchmark, start_date=backtest_start_date, end_date=backtest_end_date, during_backtest=False)
+        benchmark_daily_price.index = pd.to_datetime(benchmark_daily_price['trade_date'])
+        benchmark_daily_price = benchmark_daily_price.reindex(pd.date_range(start=backtest_start_date, end=backtest_end_date), method='ffill')
+        factor_backtest_result[backtest_benchmark] = benchmark_daily_price['close'].pct_change()
         factor_backtest_result = factor_backtest_result.fillna(0)
 
-        metrics = calc_metrics(factor_backtest_result[factor_backtest_num_groups-1], factor_backtest_result['基准'])
+        metrics = calc_metrics(factor_backtest_result[factor_backtest_num_groups-1], factor_backtest_result[backtest_benchmark])
         with metric_placeholder:
             annual_ret_col, annual_vol_col = st.columns(2)
             cum_ret_col, excess_cum_ret_col, sharpe_ret_col = st.columns(3)
@@ -178,10 +196,10 @@ with factor_tab:
             with st.expander('更多指标'):
                 st.table(metrics)
         factor_backtest_result = (factor_backtest_result+1).cumprod()
+
         line = (
                 Line()
                 .add_xaxis(list(factor_backtest_result.index.strftime("%Y-%m-%d")))
-                .add_yaxis('基准', factor_backtest_result['基准'])
                 .set_global_opts(
                     xaxis_opts=opts.AxisOpts(type_="category", boundary_gap=False),
                     yaxis_opts=opts.AxisOpts(type_="value"),
@@ -189,8 +207,8 @@ with factor_tab:
                     datazoom_opts=[opts.DataZoomOpts(type_="inside", range_start=0, range_end=100), opts.DataZoomOpts(type_="slider", range_start=0, range_end=100)]
                 )
             )
-        for group in range(factor_backtest_num_groups):
-            line.add_yaxis(f'第{group}组', factor_backtest_result[group])
+        for group in factor_backtest_result.columns:
+            line.add_yaxis(group, factor_backtest_result[group], label_opts=opts.LabelOpts(is_show=False))
         with plot_placeholder:
             with st.container(height=500):
                 st_pyecharts(line, height=500)
@@ -205,8 +223,10 @@ with factor_tab:
         # 保存回测结果指标（xlsx格式）
         metrics.to_excel(f'factor_result/{factor_backtest_name}/metrics.xlsx')
         # 保存因子文件（parquet格式）
-        factor.to_parquet(f'factor_result/{factor_backtest_name}/factor.parquet')
-        
+        factor.to_parquet(f'factor_result/{factor_backtest_name}/factor.parquet')  
+        # 生成quantstats报告
+        qs.reports.html(factor_backtest_result[factor_backtest_num_groups-1], factor_backtest_result[backtest_benchmark], output=f'factor_result/{factor_backtest_name}/多头_quantstats.html')     
+        qs.reports.html(factor_backtest_result['多空'], factor_backtest_result[backtest_benchmark], output=f'factor_result/{factor_backtest_name}/多空_quantstats.html')
 
 with data_tab:
     tables = backtest.cursor.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()
