@@ -7,14 +7,18 @@ import empyrical
 import pickle
 from tqdm import tqdm
 from tqdm.notebook import tqdm as ntqdm
-import inspect
 import sqlite3
 import time
-from functools import wraps
 from stqdm import stqdm
+from pyecharts import options as opts
+from pyecharts.charts import Boxplot, Line,Bar, Grid, Page, Timeline
+from pyecharts.globals import CurrentConfig, NotebookType
+from plotly.subplots import make_subplots
+import plotly.graph_objects as go
+import plotly.io as pio
 import warnings
+import quantstats as qs
 warnings.filterwarnings('ignore')
-from functools import lru_cache
 
 
 with open('token.txt', 'r') as f:
@@ -707,19 +711,58 @@ class Junnko_Backtest(Database):
         net_value += (position_df['shares']*position_df['price']).sum()
         return net_value
 
-    def run_event_backtest(self, start_date, end_date, initial_capital, commission_rate, strategy):
+    def run_event_backtest(self, name, start_date, end_date, initial_capital, commission_rate, strategy_code, benchmark):
+        if os.path.exists(f'event_result/{name}'):
+            raise Exception('重复名称')
+        exec(strategy_code, globals())
+        self.strategy = globals()['my_strategy']
+
         all_dates = pd.date_range(start_date, end_date)
-        self.strategy = strategy
         self.cash = initial_capital
         self.commission_rate = commission_rate
         self.position = {}
+        event_backtest_result = pd.DataFrame(columns=["现金", "策略", benchmark,
+                                    '现金_标准化', '策略_标准化', f'{benchmark}_标准化'])
         for i in tqdm(range(len(all_dates)), desc='回测进行中'):
             self.current_date = all_dates[i]
             self.strategy(self)
             net_value = self.calculate_net_value()
-            yield i, self.cash, net_value
+            benchmark_value = self.get_daily_data(col='close', table='index_daily_price', codes=benchmark, date=None)['close'].iloc[0]
+            event_backtest_result.loc[self.current_date, ["现金", "策略", benchmark]] = [self.cash, net_value, benchmark_value]
+            event_backtest_result.loc[self.current_date, ['现金_标准化', '策略_标准化', f'{benchmark}_标准化']] = [self.cash/initial_capital, net_value/initial_capital, benchmark_value/event_backtest_result.iloc[0][benchmark]]  
+            yield event_backtest_result
+
+        metrics = calc_metrics(event_backtest_result['策略'].pct_change(), event_backtest_result[benchmark].pct_change()) 
+        os.makedirs(f'event_result/{name}')
+        # 保存策略代码
+        with open(f'event_result/{name}/strategy.txt', 'w') as f:
+            f.write(strategy_code)
+        # 保存回测结果图（html格式）
+        line = (
+                Line()
+                .add_xaxis(list(event_backtest_result.index.strftime("%Y-%m-%d")))
+                .set_global_opts(
+                    xaxis_opts=opts.AxisOpts(type_="category", boundary_gap=False),
+                    yaxis_opts=opts.AxisOpts(type_="value"),
+                    tooltip_opts=opts.TooltipOpts(trigger="axis", axis_pointer_type="cross"),
+                    datazoom_opts=[opts.DataZoomOpts(type_="inside", range_start=0, range_end=100), opts.DataZoomOpts(type_="slider", range_start=0, range_end=100)]
+                )
+            )
+        for col in ['现金_标准化', '策略_标准化', f'{benchmark}_标准化']:
+            line.add_yaxis(col.replace('_标准化', ''), event_backtest_result[col], label_opts=opts.LabelOpts(is_show=False))
+        line.render(f'event_result/{name}/backtest_result.html')
+        #pio.write_html(fig, f'event_result/{event_backtest_name}/backtest_result.html')
+        # 保存回测结果表格（xlsx格式）
+        event_backtest_result.to_excel(f'event_result/{name}/backtest_result.xlsx')
+        # 保存回测结果指标（xlsx格式）
+        metrics.to_excel(f'event_result/{name}/metrics.xlsx')
+        # 生成quantstats报告
+        qs.reports.html(event_backtest_result['策略'].pct_change(), event_backtest_result[benchmark].pct_change(), output=f'event_result/{name}/quantstats.html')
     
-    def run_factor_backtest(self, start_date, end_date, freq, factor, num_groups, stock_pool):
+    def run_factor_backtest(self, name, start_date, end_date, factor, num_groups, stock_pool, benchmark, factor_shift):
+        if os.path.exists(f'factor_result/{name}'):
+            raise Exception('重复名称')
+        factor = factor.shift(factor_shift)
         all_dates = pd.date_range(start_date, end_date)
 
         print('正在生成股票池')
@@ -738,7 +781,6 @@ class Junnko_Backtest(Database):
         stock_daily_ret = stock_daily_ret.reindex(all_dates, method=None).fillna(0)
         factor.index = pd.to_datetime(factor.index)
         factor = factor.reindex(all_dates, method='ffill')
-
         
         print('正在生成分组持仓')
         factor = factor[stock_pool_pivot_df]
@@ -751,15 +793,13 @@ class Junnko_Backtest(Database):
                 position[(factor_rank >= cut*group) & (factor_rank <= cut*(group+1))] = True
             else:
                 position[(factor_rank > cut*group) & (factor_rank <= cut*(group+1))] = True
-            positions[group] = position
+            positions[group] = position        
         
-        
-        if freq != 'D':
-            print('正在按持仓频率调整持仓')
-            for group in tqdm(range(num_groups)):
-                position = positions[group]
-                positions[group] = position.resample(freq, label='left').first().reindex(position.index, method='ffill')
-
+        # if freq != 'D':
+        #     print('正在按持仓频率调整持仓')
+        #     for group in tqdm(range(num_groups)):
+        #         position = positions[group]
+        #         positions[group] = position.resample(freq, label='left').first().reindex(position.index, method='ffill')
 
         print('正在计算分组收益')
         group_rets = pd.DataFrame(index=all_dates, columns=list(range(num_groups)))
@@ -767,4 +807,125 @@ class Junnko_Backtest(Database):
             group_ret = stock_daily_ret.loc[start_date:end_date][positions[group]].mean(axis=1, skipna=True)
             group_rets[group] = group_ret
         group_rets['多空'] = (group_rets[num_groups-1] - group_rets[0])/2
-        return group_rets
+        factor_backtest_result = group_rets
+
+        # 计算换手率
+        turnover = pd.DataFrame(index=list(range(num_groups)), columns=['1D', '5D', '10D'])
+        for group in range(num_groups):
+            position = positions[group]
+            for f in [1, 5, 10]:
+                turnover.loc[group, f'{f}D'] = (position.diff().sum(axis=1) / position.sum(axis=1).shift(f).replace(0, np.nan)).mean()
+        
+        # 计算IC
+        ic_1D = factor.corrwith(stock_daily_ret, axis=1, method='pearson')
+        RankIC_1D = factor.rank(axis=1).corrwith(stock_daily_ret.rank(axis=1), axis=1, method='spearman')
+        cum_ret_5D = np.exp(np.log(stock_daily_ret+1).resample('5D').sum())-1
+        ic_5D = factor.resample('5D').first().corrwith(cum_ret_5D, axis=1, method='pearson')
+        RankIC_5D = factor.resample('5D').first().rank(axis=1).corrwith(cum_ret_5D.rank(axis=1), axis=1, method='spearman')
+        cum_ret_10D = np.exp(np.log(stock_daily_ret+1).resample('10D').sum())-1
+        ic_10D = factor.resample('10D').first().corrwith(cum_ret_10D, axis=1, method='pearson')
+        RankIC_10D = factor.resample('10D').first().rank(axis=1).corrwith(cum_ret_10D.rank(axis=1), axis=1, method='spearman')
+
+        ic_df = pd.DataFrame(index=['IC', 'RankIC', 'IR'], columns=['1D', '5D', '10D'])
+        ic_df.loc['IC', '1D'] = ic_1D.mean()
+        ic_df.loc['RankIC', '1D'] = RankIC_1D.mean()
+        ic_df.loc['IR', '1D'] = ic_1D.mean() / ic_1D.std()
+        ic_df.loc['IC', '5D'] = ic_5D.mean()
+        ic_df.loc['RankIC', '5D'] = RankIC_5D.mean()
+        ic_df.loc['IR', '5D'] = ic_5D.mean() / ic_5D.std() 
+        ic_df.loc['IC', '10D'] = ic_10D.mean()
+        ic_df.loc['RankIC', '10D'] = RankIC_10D.mean()
+        ic_df.loc['IR', '10D'] = ic_10D.mean() / ic_10D.std() 
+
+        raw_ic_1D_df = pd.concat([ic_1D, RankIC_1D], axis=1)
+        raw_ic_1D_df.columns = ['IC', 'RankIC']
+        raw_ic_5D_df = pd.concat([ic_5D, RankIC_5D], axis=1)
+        raw_ic_5D_df.columns = ['IC', 'RankIC']
+        raw_ic_10D_df = pd.concat([ic_10D, RankIC_10D], axis=1)
+        raw_ic_10D_df.columns = ['IC', 'RankIC']
+
+        benchmark_daily_price = self.get_historical_data(col='close', table='index_daily_price', codes=benchmark, start_date=start_date, end_date=end_date, during_backtest=False)
+        benchmark_daily_price.index = pd.to_datetime(benchmark_daily_price['trade_date'])
+        benchmark_daily_price = benchmark_daily_price.reindex(pd.date_range(start=start_date, end=end_date), method='ffill')
+        factor_backtest_result[benchmark] = benchmark_daily_price['close'].pct_change()
+        factor_backtest_result = factor_backtest_result.fillna(0)    
+
+        metrics = calc_metrics(factor_backtest_result[num_groups-1], factor_backtest_result[benchmark])
+
+        factor_backtest_result = (factor_backtest_result+1).cumprod()
+
+        line = (
+                Line()
+                .set_global_opts(
+                    tooltip_opts=opts.TooltipOpts(trigger="axis", axis_pointer_type="cross"),
+                    legend_opts=opts.LegendOpts(),
+                    datazoom_opts=[opts.DataZoomOpts(type_="inside", range_start=0, range_end=100), opts.DataZoomOpts(type_="slider", range_start=0, range_end=100)]
+                )
+                .add_xaxis(factor_backtest_result.index.tolist())
+            )
+        for group in range(num_groups):
+            line.add_yaxis(f'第{group}组', factor_backtest_result[group], label_opts=opts.LabelOpts(is_show=False))
+        for group in ['多空', benchmark]:
+            line.add_yaxis(group, factor_backtest_result[group], label_opts=opts.LabelOpts(is_show=False))
+        
+        if '画IC图':
+            ic_plot1 = (
+                    Line()
+                    .add_xaxis(raw_ic_1D_df.index.tolist())
+                    .set_global_opts(
+                        tooltip_opts=opts.TooltipOpts(trigger="axis", axis_pointer_type="cross"),
+                        datazoom_opts=[opts.DataZoomOpts(type_="inside", range_start=0, range_end=100), opts.DataZoomOpts(type_="slider", range_start=0, range_end=100)]
+                    )
+                    .add_yaxis('IC_1D', raw_ic_1D_df['IC'].ffill(), label_opts=opts.LabelOpts(is_show=False))
+                    .add_yaxis('IC_1D_1M_moving_avg', raw_ic_1D_df['IC'].ffill().rolling(30).mean(), label_opts=opts.LabelOpts(is_show=False))
+                )
+            ic_plot2 = (
+                    Line()
+                    .add_xaxis(raw_ic_5D_df.index.tolist())
+                    .set_global_opts(
+                        tooltip_opts=opts.TooltipOpts(trigger="axis", axis_pointer_type="cross"),
+                        datazoom_opts=[opts.DataZoomOpts(type_="inside", range_start=0, range_end=100), opts.DataZoomOpts(type_="slider", range_start=0, range_end=100)]
+                    )
+                    .add_yaxis('IC_5D', raw_ic_5D_df['IC'], label_opts=opts.LabelOpts(is_show=False))
+                    .add_yaxis('IC_5D_1M_moving_avg', raw_ic_5D_df['IC'].ffill().rolling(30).mean(), label_opts=opts.LabelOpts(is_show=False))
+                )
+            ic_plot3 = (
+                    Line()
+                    .add_xaxis(raw_ic_10D_df.index.tolist())
+                    .set_global_opts(
+                        tooltip_opts=opts.TooltipOpts(trigger="axis", axis_pointer_type="cross"),
+                        datazoom_opts=[opts.DataZoomOpts(type_="inside", range_start=0, range_end=100), opts.DataZoomOpts(type_="slider", range_start=0, range_end=100)]
+                    )
+                    .add_yaxis('IC_10D', raw_ic_10D_df['IC'], label_opts=opts.LabelOpts(is_show=False))
+                    .add_yaxis('IC_10D_1M_moving_avg', raw_ic_10D_df['IC'].ffill().rolling(30).mean(), label_opts=opts.LabelOpts(is_show=False))
+                )
+            ic_plot = (
+                Page()
+                .add(ic_plot1)
+                .add(ic_plot2)
+                .add(ic_plot3)
+            )
+
+        os.makedirs(f'factor_result/{name}')
+        # 保存IC
+        with pd.ExcelWriter(f'factor_result/{name}/ic.xlsx') as writer:
+            ic_df.to_excel(writer, sheet_name='summary')
+            raw_ic_1D_df.to_excel(writer, sheet_name='1D')
+            raw_ic_5D_df.to_excel(writer, sheet_name='5D')
+            raw_ic_10D_df.to_excel(writer, sheet_name='10D')
+        ic_plot.render(f'factor_result/{name}/IC.html')
+        # 保存换手率
+        turnover.to_excel(f'factor_result/{name}/turnover.xlsx')
+        # 保存回测结果图（html格式）
+        line.render(f'factor_result/{name}/backtest_result.html')
+        # 保存回测结果表格（xlsx格式）
+        factor_backtest_result.to_excel(f'factor_result/{name}/backtest_result.xlsx')
+        # 保存回测结果指标（xlsx格式）
+        metrics.to_excel(f'factor_result/{name}/metrics.xlsx')
+        # 保存因子文件（parquet格式）
+        factor.to_parquet(f'factor_result/{name}/factor.parquet')  
+        # 生成quantstats报告
+        qs.reports.html(factor_backtest_result[num_groups-1], factor_backtest_result[benchmark], output=f'factor_result/{name}/多头_quantstats.html')     
+        qs.reports.html(factor_backtest_result['多空'], factor_backtest_result[benchmark], output=f'factor_result/{name}/多空_quantstats.html')
+
+        return factor_backtest_result, metrics, line, [ic_plot1, ic_plot2, ic_plot3]

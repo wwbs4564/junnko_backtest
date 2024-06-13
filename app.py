@@ -2,16 +2,10 @@ import streamlit as st
 import pandas as pd
 from junnko_backtest import *
 from streamlit_echarts import st_pyecharts, st_echarts
-from pyecharts import options as opts
-from pyecharts.charts import Boxplot, Line,Bar, Grid, Page, Timeline
-from pyecharts.globals import CurrentConfig, NotebookType
 from stqdm import stqdm
 from streamlit_ace import st_ace
 import empyrical
 import gc
-import plotly.graph_objects as go
-import plotly.io as pio
-import quantstats as qs
 import base64
 
 
@@ -75,20 +69,17 @@ def my_strategy(self):
                 ''', language='python', auto_update=True, font_size=20, wrap=event_tab_wrap)
     
     if event_backtest_start:
-        # 动态定义策略函数
-        exec(strategy_code, globals())
-        strategy = globals()['my_strategy']
-        all_dates = pd.date_range(backtest_start_date, backtest_end_date)
-        event_backtest_result = pd.DataFrame(columns=["现金", "策略", backtest_benchmark,
-                                    '现金_标准化', '策略_标准化', f'{backtest_benchmark}_标准化'])
-            
         # 执行回测并动态更新图表
-        for date_idx, cash, net_value in backtest.run_event_backtest(backtest_start_date.strftime('%Y%m%d'), backtest_end_date.strftime('%Y%m%d'), event_backtest_initial_capital, event_backtest_commission_rate/1000, strategy):
-            benchmark_value = backtest.get_daily_data(col='close', table='index_daily_price', codes=backtest_benchmark, date=None)['close'].iloc[0]
-            event_backtest_result.loc[all_dates[date_idx], ["现金", "策略", backtest_benchmark]] = [cash, net_value, benchmark_value]
-            event_backtest_result.loc[all_dates[date_idx], ['现金_标准化', '策略_标准化', f'{backtest_benchmark}_标准化']] = [cash/event_backtest_initial_capital, net_value/event_backtest_initial_capital, benchmark_value/event_backtest_result.iloc[0][backtest_benchmark]]            
-
-            
+        for event_backtest_result in backtest.run_event_backtest(
+            name=event_backtest_name,
+            start_date=backtest_start_date.strftime('%Y%m%d'), 
+            end_date=backtest_end_date.strftime('%Y%m%d'), 
+            initial_capital=event_backtest_initial_capital, 
+            commission_rate=event_backtest_commission_rate/1000, 
+            strategy_code=strategy_code,
+            benchmark=backtest_benchmark
+            ):
+                  
             with plot_placeholder:
                 with st.container(height=500):
                     fig = go.Figure()
@@ -96,8 +87,6 @@ def my_strategy(self):
                     fig.add_trace(go.Scatter(name=backtest_benchmark, x=event_backtest_result.index, y=event_backtest_result[f'{backtest_benchmark}_标准化'], mode='lines'))
                     fig.add_trace(go.Scatter(name='现金', x=event_backtest_result.index, y=event_backtest_result['现金_标准化'], mode='lines'))
                     st.write(fig)
-                    # if date_idx % 50 == 0:
-                    #     plot_placeholder.empty()
 
         metrics = calc_metrics(event_backtest_result['策略'].pct_change(), event_backtest_result[backtest_benchmark].pct_change())
         with metric_placeholder:
@@ -118,40 +107,19 @@ def my_strategy(self):
         
         table_placeholder.dataframe(event_backtest_result)
 
-        os.makedirs(f'event_result/{event_backtest_name}')
-        # 保存策略代码
-        with open(f'event_result/{event_backtest_name}/strategy.txt', 'w') as f:
-            f.write(strategy_code)
-        # 保存回测结果图（html格式）
-        line = (
-                Line()
-                .add_xaxis(list(event_backtest_result.index.strftime("%Y-%m-%d")))
-                .set_global_opts(
-                    xaxis_opts=opts.AxisOpts(type_="category", boundary_gap=False),
-                    yaxis_opts=opts.AxisOpts(type_="value"),
-                    tooltip_opts=opts.TooltipOpts(trigger="axis", axis_pointer_type="cross"),
-                    datazoom_opts=[opts.DataZoomOpts(type_="inside", range_start=0, range_end=100), opts.DataZoomOpts(type_="slider", range_start=0, range_end=100)]
-                )
-            )
-        for col in ['现金_标准化', '策略_标准化', f'{backtest_benchmark}_标准化']:
-            line.add_yaxis(col.replace('_标准化', ''), event_backtest_result[col], label_opts=opts.LabelOpts(is_show=False))
-        line.render(f'event_result/{event_backtest_name}/backtest_result.html')
-        #pio.write_html(fig, f'event_result/{event_backtest_name}/backtest_result.html')
-        # 保存回测结果表格（xlsx格式）
-        event_backtest_result.to_excel(f'event_result/{event_backtest_name}/backtest_result.xlsx')
-        # 保存回测结果指标（xlsx格式）
-        metrics.to_excel(f'event_result/{event_backtest_name}/metrics.xlsx')
-        # 生成quantstats报告
-        qs.reports.html(event_backtest_result['策略'].pct_change(), event_backtest_result[backtest_benchmark].pct_change(), output=f'event_result/{event_backtest_name}/quantstats.html')
 
 with factor_tab:
-    factor_backtest_start = st.button("运行回测", key='factor_start')
-    
     col1, col2, col3, col4 = st.columns(4)
-    factor_file = st.file_uploader("上传因子文件", type=['parquet'])
+    factor_file = st.file_uploader("上传因子文件（用于单因子回测）", type=['parquet'])
+    factor_folder = st.text_input("因子文件夹路径（用于批量因子回测）")
+    factor_backtest_start = st.button("单因子回测", key='factor_backtest_start')
+    multiple_factor_backtest_start = st.button("批量因子回测", key='multiple_factor_backtest_start')
 
     metric_placeholder = st.container()
-    plot_placeholder = st.empty()
+    plot_placeholder_1 = st.empty()
+    plot_placeholder_2 = st.empty()
+    plot_placeholder_3 = st.empty()
+    plot_placeholder_4 = st.empty()
     table_placeholder = st.expander('回测结果表格')
 
     with col1:
@@ -159,27 +127,23 @@ with factor_tab:
     with col2:
         factor_backtest_num_groups = st.number_input("分组数量:", min_value=0, value=5)
     with col3:
-        factor_backtest_freq = st.selectbox("调仓频率:", ['D', 'W', 'M', 'Q', 'Y'], index=2)
-    with col4:
         factor_backtest_stock_pool = st.text_input("股票池:", value='399300.SZ')
+    with col4:
+        factor_shift = st.slider("因子的滞后天数，防止未来函数", min_value=0, max_value=10, value=1, step=1)
     
     if factor_backtest_start:
         factor = pd.read_parquet(factor_file)
-        factor_backtest_result = backtest.run_factor_backtest(
+        factor_backtest_result, metrics, line, ic_plots = backtest.run_factor_backtest(
+            name = factor_backtest_name,
             start_date=backtest_start_date.strftime('%Y%m%d'), 
             end_date=backtest_end_date.strftime('%Y%m%d'),
-            freq=factor_backtest_freq,
             factor=factor,
             num_groups=factor_backtest_num_groups,
-            stock_pool=factor_backtest_stock_pool
+            stock_pool=factor_backtest_stock_pool,
+            benchmark=backtest_benchmark,
+            factor_shift=factor_shift
             )
-        benchmark_daily_price = backtest.get_historical_data(col='close', table='index_daily_price', codes=backtest_benchmark, start_date=backtest_start_date, end_date=backtest_end_date, during_backtest=False)
-        benchmark_daily_price.index = pd.to_datetime(benchmark_daily_price['trade_date'])
-        benchmark_daily_price = benchmark_daily_price.reindex(pd.date_range(start=backtest_start_date, end=backtest_end_date), method='ffill')
-        factor_backtest_result[backtest_benchmark] = benchmark_daily_price['close'].pct_change()
-        factor_backtest_result = factor_backtest_result.fillna(0)
 
-        metrics = calc_metrics(factor_backtest_result[factor_backtest_num_groups-1], factor_backtest_result[backtest_benchmark])
         with metric_placeholder:
             annual_ret_col, annual_vol_col = st.columns(2)
             cum_ret_col, excess_cum_ret_col, sharpe_ret_col = st.columns(3)
@@ -195,38 +159,35 @@ with factor_tab:
                 st.metric(label="夏普比率", value=round(metrics['sharpe比率'], 2))
             with st.expander('更多指标'):
                 st.table(metrics)
-        factor_backtest_result = (factor_backtest_result+1).cumprod()
+        
+        with plot_placeholder_1:
+            st_pyecharts(line, height=500)
+        with plot_placeholder_2:
+            st_pyecharts(ic_plots[0])
+        with plot_placeholder_3:
+            st_pyecharts(ic_plots[1])
+        with plot_placeholder_4:
+            st_pyecharts(ic_plots[2])
 
-        line = (
-                Line()
-                .add_xaxis(list(factor_backtest_result.index.strftime("%Y-%m-%d")))
-                .set_global_opts(
-                    xaxis_opts=opts.AxisOpts(type_="category", boundary_gap=False),
-                    yaxis_opts=opts.AxisOpts(type_="value"),
-                    tooltip_opts=opts.TooltipOpts(trigger="axis", axis_pointer_type="cross"),
-                    datazoom_opts=[opts.DataZoomOpts(type_="inside", range_start=0, range_end=100), opts.DataZoomOpts(type_="slider", range_start=0, range_end=100)]
-                )
-            )
-        for group in factor_backtest_result.columns:
-            line.add_yaxis(group, factor_backtest_result[group], label_opts=opts.LabelOpts(is_show=False))
-        with plot_placeholder:
-            with st.container(height=500):
-                st_pyecharts(line, height=500)
         with st.expander('回测结果表格'):
             st.dataframe(factor_backtest_result)
-        
-        os.makedirs(f'factor_result/{factor_backtest_name}')
-        # 保存回测结果图（html格式）
-        line.render(f'factor_result/{factor_backtest_name}/backtest_result.html')
-        # 保存回测结果表格（xlsx格式）
-        factor_backtest_result.to_excel(f'factor_result/{factor_backtest_name}/backtest_result.xlsx')
-        # 保存回测结果指标（xlsx格式）
-        metrics.to_excel(f'factor_result/{factor_backtest_name}/metrics.xlsx')
-        # 保存因子文件（parquet格式）
-        factor.to_parquet(f'factor_result/{factor_backtest_name}/factor.parquet')  
-        # 生成quantstats报告
-        qs.reports.html(factor_backtest_result[factor_backtest_num_groups-1], factor_backtest_result[backtest_benchmark], output=f'factor_result/{factor_backtest_name}/多头_quantstats.html')     
-        qs.reports.html(factor_backtest_result['多空'], factor_backtest_result[backtest_benchmark], output=f'factor_result/{factor_backtest_name}/多空_quantstats.html')
+    
+    if multiple_factor_backtest_start:
+        factor_filenames = os.listdir(factor_folder)
+        factor_files = [pd.read_parquet(os.path.join(factor_folder, f)) for f in factor_filenames]
+        factor_names = [f.split('.')[0] for f in factor_filenames]
+        for i in stqdm(range(len(factor_files))):
+            factor_backtest_result, metrics, line, ic_plots = backtest.run_factor_backtest(
+                name = factor_names[i],
+                start_date=backtest_start_date.strftime('%Y%m%d'), 
+                end_date=backtest_end_date.strftime('%Y%m%d'),
+                factor=factor_files[i],
+                num_groups=factor_backtest_num_groups,
+                stock_pool=factor_backtest_stock_pool,
+                benchmark=backtest_benchmark,
+                factor_shift=factor_shift
+                )
+            
 
 with data_tab:
     tables = backtest.cursor.execute("SELECT name FROM sqlite_master WHERE type='table';").fetchall()
